@@ -815,11 +815,19 @@ def add_deal():
     if request.headers.get("X-API-Secret") != API_SECRET or not API_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json(silent=True)
-    if not data:
+    if not data or "asin" not in data:
         return jsonify({"error": "No data"}), 400
     data["timestamp"] = datetime.utcnow().isoformat()
+
+    # If this ASIN is already listed, update it in place instead of adding a duplicate
+    for i, existing in enumerate(deals):
+        if existing.get("asin") == data["asin"]:
+            deals[i] = data          # update with latest price + timestamp
+            deals.insert(0, deals.pop(i))  # move to top
+            return jsonify({"ok": True, "updated": True}), 200
+
     deals.insert(0, data)
-    return jsonify({"ok": True}), 200
+    return jsonify({"ok": True, "updated": False}), 200
 
 
 @app.route("/health")
