@@ -205,13 +205,13 @@ HOMEPAGE = """{{ head }}
   {% if deals %}
   <div class="section-title">🔥 Live Deals</div>
 
-  <div class="tabs">
-    <div class="tab active" onclick="filterDeals('all', this)">All</div>
-    <div class="tab" onclick="filterDeals('UK', this)">🇬🇧 UK</div>
-    <div class="tab" onclick="filterDeals('DE', this)">🇩🇪 Germany</div>
-    <div class="tab" onclick="filterDeals('FR', this)">🇫🇷 France</div>
-    <div class="tab" onclick="filterDeals('IT', this)">🇮🇹 Italy</div>
-    <div class="tab" onclick="filterDeals('ES', this)">🇪🇸 Spain</div>
+  <div class="tabs" id="market-tabs">
+    <div class="tab" data-market="all"  onclick="filterDeals('all', this)">All</div>
+    <div class="tab" data-market="UK"   onclick="filterDeals('UK', this)">🇬🇧 UK</div>
+    <div class="tab" data-market="DE"   onclick="filterDeals('DE', this)">🇩🇪 Germany</div>
+    <div class="tab" data-market="FR"   onclick="filterDeals('FR', this)">🇫🇷 France</div>
+    <div class="tab" data-market="IT"   onclick="filterDeals('IT', this)">🇮🇹 Italy</div>
+    <div class="tab" data-market="ES"   onclick="filterDeals('ES', this)">🇪🇸 Spain</div>
   </div>
 
   <div class="grid" id="deals-grid">
@@ -260,7 +260,18 @@ HOMEPAGE = """{{ head }}
       if (show) visible++;
     });
     document.getElementById('no-deals-msg').style.display = visible === 0 ? 'block' : 'none';
+    var url = new URL(window.location);
+    if (source === 'all') { url.searchParams.delete('m'); } else { url.searchParams.set('m', source); }
+    history.replaceState(null, '', url);
   }
+
+  // On load: activate tab from URL param ?m=XX
+  (function() {
+    var param = new URL(window.location).searchParams.get('m') || 'all';
+    var tab = document.querySelector('#market-tabs .tab[data-market="' + param + '"]') ||
+              document.querySelector('#market-tabs .tab[data-market="all"]');
+    if (tab) filterDeals(param, tab);
+  })();
   </script>
 
   {% else %}
