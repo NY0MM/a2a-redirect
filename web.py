@@ -76,6 +76,12 @@ footer { background: #111827; color: #6b7280; padding: 40px 24px; font-size: 13p
 .article .tip-box p { margin: 0; color: #92400e; font-weight: 500; }
 .affiliate-notice { background: #f9fafb; border: 1px solid #e5e7eb; padding: 14px 18px; border-radius: 8px; font-size: 13px; color: #6b7280; margin-bottom: 32px; }
 
+/* MARKETPLACE TABS */
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+.tab { padding: 8px 18px; border-radius: 999px; font-size: 14px; font-weight: 600; cursor: pointer; border: 2px solid #e5e7eb; background: #fff; color: #374151; transition: all 0.15s; user-select: none; }
+.tab:hover { border-color: #f97316; color: #f97316; }
+.tab.active { background: #f97316; border-color: #f97316; color: #fff; }
+
 /* DEAL CARDS */
 .section-title { font-size: 20px; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
 .section-title::after { content: ''; flex: 1; height: 1px; background: #e5e7eb; }
@@ -85,6 +91,7 @@ footer { background: #111827; color: #6b7280; padding: 40px 24px; font-size: 13p
 .card-img-wrap { position: relative; background: #fff; padding: 16px; display: flex; align-items: center; justify-content: center; height: 200px; border-bottom: 1px solid #f3f4f6; }
 .card-img-wrap img { max-height: 168px; max-width: 100%; object-fit: contain; }
 .badge { position: absolute; top: 10px; left: 10px; background: #ef4444; color: #fff; font-size: 13px; font-weight: 800; padding: 4px 10px; border-radius: 6px; }
+.market-badge { position: absolute; top: 10px; right: 10px; font-size: 18px; line-height: 1; }
 .card-body { padding: 14px; flex: 1; display: flex; flex-direction: column; }
 .card-title { font-size: 13px; font-weight: 500; color: #374151; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 12px; flex: 1; }
 .price-row { margin-bottom: 12px; }
@@ -197,12 +204,25 @@ HOMEPAGE = """{{ head }}
 
   {% if deals %}
   <div class="section-title">🔥 Live Deals</div>
-  <div class="grid">
+
+  <div class="tabs">
+    <div class="tab active" onclick="filterDeals('all', this)">All</div>
+    <div class="tab" onclick="filterDeals('UK', this)">🇬🇧 UK</div>
+    <div class="tab" onclick="filterDeals('DE', this)">🇩🇪 Germany</div>
+    <div class="tab" onclick="filterDeals('FR', this)">🇫🇷 France</div>
+    <div class="tab" onclick="filterDeals('IT', this)">🇮🇹 Italy</div>
+    <div class="tab" onclick="filterDeals('ES', this)">🇪🇸 Spain</div>
+  </div>
+
+  <div class="grid" id="deals-grid">
     {% for deal in deals %}
-    <div class="card">
+    {% set source = deal.source if deal.source else 'UK' %}
+    {% set flags = {'UK': '🇬🇧', 'DE': '🇩🇪', 'FR': '🇫🇷', 'IT': '🇮🇹', 'ES': '🇪🇸'} %}
+    <div class="card" data-source="{{ source }}">
       <div class="card-img-wrap">
         <img src="{{ deal.image }}" alt="{{ deal.title }}" onerror="this.src='https://via.placeholder.com/200x200?text=No+Image'">
         {% if deal.discount_percent > 0 %}<div class="badge">-{{ deal.discount_percent }}%</div>{% endif %}
+        <div class="market-badge" title="{{ source }}">{{ flags.get(source, '🛒') }}</div>
       </div>
       <div class="card-body">
         <div class="card-title">{{ deal.title }}</div>
@@ -221,6 +241,28 @@ HOMEPAGE = """{{ head }}
     </div>
     {% endfor %}
   </div>
+
+  <div id="no-deals-msg" style="display:none;" class="empty">
+    <div class="empty-icon">🔍</div>
+    <h2>No deals in this marketplace yet</h2>
+    <p>Check back shortly — deals are added automatically.</p>
+  </div>
+
+  <script>
+  function filterDeals(source, el) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    var cards = document.querySelectorAll('#deals-grid .card');
+    var visible = 0;
+    cards.forEach(function(card) {
+      var show = source === 'all' || card.dataset.source === source;
+      card.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    document.getElementById('no-deals-msg').style.display = visible === 0 ? 'block' : 'none';
+  }
+  </script>
+
   {% else %}
   <div class="empty">
     <div class="empty-icon">🔍</div>
@@ -808,6 +850,56 @@ def deal(asin):
         return "Invalid ASIN", 400
     amazon_url = f"https://www.amazon.co.uk/dp/{asin}?tag={AFFILIATE_TAG}&th=1&psc=1"
     return redirect(amazon_url, 302)
+
+
+@app.route("/app/deal/<asin>")
+def deal_app(asin):
+    if not asin.isalnum() or len(asin) != 10:
+        return "Invalid ASIN", 400
+
+    amazon_web_url = f"https://www.amazon.co.uk/dp/{asin}?tag={AFFILIATE_TAG}&th=1&psc=1"
+    ua = request.headers.get("User-Agent", "")
+    is_mobile = any(x in ua for x in ["iPhone", "iPad", "Android"])
+
+    if not is_mobile:
+        return redirect(amazon_web_url, 302)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opening Amazon...</title>
+<style>
+  body {{ font-family: -apple-system, sans-serif; display: flex; align-items: center;
+         justify-content: center; min-height: 100vh; margin: 0; background: #f3f3f3; }}
+  .box {{ text-align: center; padding: 2rem; }}
+  a {{ color: #e47911; font-weight: bold; }}
+</style>
+</head>
+<body>
+<div class="box">
+  <p>Opening in Amazon app...</p>
+  <p><a href="{amazon_web_url}">Tap here if nothing happens</a></p>
+</div>
+<script>
+  var webUrl = "{amazon_web_url}";
+  var ua = navigator.userAgent;
+  var isIOS = /iPhone|iPad|iPod/.test(ua);
+  var isAndroid = /Android/.test(ua);
+
+  if (isIOS) {{
+    window.location.href = webUrl;
+  }} else if (isAndroid) {{
+    window.location.href = "intent://www.amazon.co.uk/dp/{asin}?tag={AFFILIATE_TAG}&th=1&psc=1#Intent;scheme=https;package=com.amazon.mobilewindow;end";
+    setTimeout(function() {{ window.location.href = webUrl; }}, 1500);
+  }} else {{
+    window.location.href = webUrl;
+  }}
+</script>
+</body>
+</html>"""
+    return html, 200
 
 
 @app.route("/api/deal", methods=["POST"])
