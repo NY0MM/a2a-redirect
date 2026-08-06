@@ -7,6 +7,27 @@ app = Flask(__name__)
 AFFILIATE_TAG = os.environ.get("AFFILIATE_TAG", "")
 API_SECRET = os.environ.get("API_SECRET", "")
 
+# Marketplaces this redirector can send traffic to. Associates tracking IDs are
+# per-locale: a UK tag on amazon.de earns nothing, so each market reads its own
+# env var and falls back to an untagged link rather than the wrong tag.
+MARKETPLACES = {"UK": "co.uk", "DE": "de", "FR": "fr", "IT": "it", "ES": "es"}
+
+
+def tag_for(market: str) -> str:
+    if market == "UK":
+        return AFFILIATE_TAG
+    return os.environ.get(f"AFFILIATE_TAG_{market}", "")
+
+
+def amazon_url_for(market: str, asin: str) -> str:
+    """Tagged product URL. th/psc pin the exact child variant."""
+    params = (f"tag={tag_for(market)}&" if tag_for(market) else "") + "th=1&psc=1"
+    return f"https://www.amazon.{MARKETPLACES[market]}/dp/{asin}?{params}"
+
+
+def valid_asin(asin: str) -> bool:
+    return bool(asin) and asin.isalnum() and len(asin) == 10
+
 # In-memory deals store — newest first
 deals = []
 
@@ -857,18 +878,39 @@ def contact():
 
 @app.route("/deal/<asin>")
 def deal(asin):
-    if not asin.isalnum() or len(asin) != 10:
+    if not valid_asin(asin):
         return "Invalid ASIN", 400
-    amazon_url = f"https://www.amazon.co.uk/dp/{asin}?tag={AFFILIATE_TAG}&th=1&psc=1"
-    return redirect(amazon_url, 302)
+    return redirect(amazon_url_for("UK", asin), 302)
+
+
+@app.route("/deal/<market>/<asin>")
+def deal_market(market, asin):
+    """Marketplace-aware variant. /deal/DE/B0XXXXXXXX -> tagged amazon.de link."""
+    market = (market or "").upper()
+    if market not in MARKETPLACES:
+        return "Unknown marketplace", 404
+    if not valid_asin(asin):
+        return "Invalid ASIN", 400
+    return redirect(amazon_url_for(market, asin), 302)
+
+
+@app.route("/app/deal/<market>/<asin>")
+def deal_app_market(market, asin):
+    market = (market or "").upper()
+    if market not in MARKETPLACES:
+        return "Unknown marketplace", 404
+    return deal_app(asin, market)
 
 
 @app.route("/app/deal/<asin>")
-def deal_app(asin):
-    if not asin.isalnum() or len(asin) != 10:
+def deal_app(asin, market="UK"):
+    if not valid_asin(asin):
         return "Invalid ASIN", 400
 
-    amazon_web_url = f"https://www.amazon.co.uk/dp/{asin}?tag={AFFILIATE_TAG}&th=1&psc=1"
+    amazon_web_url = amazon_url_for(market, asin)
+    # Android intent target is the same URL minus the scheme, so it follows the
+    # marketplace instead of being pinned to amazon.co.uk.
+    intent_target = amazon_web_url.split("://", 1)[1]
     ua = request.headers.get("User-Agent", "")
     is_mobile = any(x in ua for x in ["iPhone", "iPad", "Android"])
 
@@ -902,7 +944,7 @@ def deal_app(asin):
   if (isIOS) {{
     window.location.href = webUrl;
   }} else if (isAndroid) {{
-    window.location.href = "intent://www.amazon.co.uk/dp/{asin}?tag={AFFILIATE_TAG}&th=1&psc=1#Intent;scheme=https;package=com.amazon.mobilewindow;end";
+    window.location.href = "intent://{intent_target}#Intent;scheme=https;package=com.amazon.mobilewindow;end";
     setTimeout(function() {{ window.location.href = webUrl; }}, 1500);
   }} else {{
     window.location.href = webUrl;
