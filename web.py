@@ -31,10 +31,23 @@ def valid_asin(asin: str) -> bool:
 # In-memory deals store — newest first
 deals = []
 
+# Private-monitor hits, kept apart from the public feed so they never appear on
+# the homepage or /deals. Rendered only at the bottom of /settings.
+#
+# NOTE: these entries deliberately carry NO member identity — no Discord ID, no
+# name, nothing tying an ASIN to a person. This page is public (it has to be:
+# every visitor gets the same HTML from Flask), so anything in here is readable
+# by anyone who finds the URL. Keeping it to asin/price/time means that is a
+# deals list rather than a disclosure of what individuals are tracking, which
+# would also contradict the privacy policy this site publishes.
+private_deals = []
+
 def clean_old_deals():
     cutoff = datetime.utcnow() - timedelta(hours=24)
-    global deals
+    global deals, private_deals
     deals = [d for d in deals if datetime.fromisoformat(d["timestamp"]) > cutoff]
+    private_deals = [d for d in private_deals
+                     if datetime.fromisoformat(d["timestamp"]) > cutoff]
 
 def time_ago(iso_timestamp):
     diff = datetime.utcnow() - datetime.fromisoformat(iso_timestamp)
@@ -766,6 +779,107 @@ CONTACT_PAGE = """{{ head }}{{ nav }}
 
 
 # ---------------------------------------------------------------------------
+# Settings — ordinary site preferences, with the private monitor feed at the
+# very bottom. Not in the nav; reachable at /settings.
+# ---------------------------------------------------------------------------
+
+SETTINGS_PAGE = """{{ head }}{{ nav }}
+<div class="page-hero">
+  <h1>Site <span>Settings</span></h1>
+  <p>Preferences for how deals are displayed. Stored in your browser only — nothing is sent to us.</p>
+</div>
+<div class="container" style="max-width:820px;">
+<div class="article">
+
+  <h2>Display</h2>
+  <div class="set-row">
+    <div><strong>Default marketplace</strong><p>Which region the deals page opens on.</p></div>
+    <select id="set-market" class="set-input">
+      <option value="all">All</option><option value="UK">UK</option>
+      <option value="DE">Germany</option><option value="FR">France</option>
+      <option value="IT">Italy</option><option value="ES">Spain</option>
+    </select>
+  </div>
+  <div class="set-row">
+    <div><strong>Open deals in a new tab</strong><p>Keeps DealScout open when you click through.</p></div>
+    <input type="checkbox" id="set-newtab" class="set-check" checked>
+  </div>
+  <div class="set-row">
+    <div><strong>Compact cards</strong><p>Fit more deals on screen at once.</p></div>
+    <input type="checkbox" id="set-compact" class="set-check">
+  </div>
+
+  <h2>Notifications</h2>
+  <div class="set-row">
+    <div><strong>Highlight big discounts</strong><p>Emphasise anything over 30% off.</p></div>
+    <input type="checkbox" id="set-highlight" class="set-check" checked>
+  </div>
+
+  <div style="margin-top:56px;padding-top:28px;border-top:1px solid #e5e7eb;">
+    <h2 style="margin-top:0;">Private monitor</h2>
+    <p style="font-size:14px;color:#6b7280;margin-bottom:20px;">
+      Price hits from tracked-product monitoring. Not shown on the main deals feed.
+    </p>
+
+    {% if private_deals %}
+    <div class="priv-list">
+      {% for d in private_deals %}
+      <div class="priv-row">
+        <div class="priv-main">
+          <span class="priv-asin">{{ d.asin }}</span>
+          <span class="priv-price">£{{ "%.2f"|format(d.price) }}</span>
+          {% if d.kind == 'Business' %}<span class="priv-tag">Business</span>{% endif %}
+        </div>
+        <div class="priv-side">
+          <span class="time-ago">{{ d.time_ago }}</span>
+          <a class="btn-deal" href="/deal/{{ d.asin }}" target="_blank" rel="nofollow noopener">View →</a>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p style="font-size:14px;color:#9ca3af;padding:24px 0;">No recent activity.</p>
+    {% endif %}
+  </div>
+
+</div>
+</div>
+
+<style>
+.set-row { display:flex; align-items:center; justify-content:space-between; gap:24px;
+           padding:16px 0; border-bottom:1px solid #f3f4f6; }
+.set-row p { font-size:13px; color:#6b7280; margin:4px 0 0; }
+.set-input { padding:8px 12px; border:1px solid #e5e7eb; border-radius:8px; font-size:14px; background:#fff; }
+.set-check { width:20px; height:20px; accent-color:#f97316; }
+.priv-list { display:flex; flex-direction:column; gap:8px; }
+.priv-row { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:14px 16px;
+            display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+.priv-main { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.priv-asin { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; color:#6b7280; }
+.priv-price { font-size:18px; font-weight:800; color:#111827; }
+.priv-tag { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+            color:#f97316; border:1px solid #fed7aa; background:#fff7ed; padding:2px 8px; border-radius:999px; }
+.priv-side { display:flex; align-items:center; gap:14px; }
+</style>
+
+<script>
+(function () {
+  var keys = ['set-market','set-newtab','set-compact','set-highlight'];
+  keys.forEach(function (k) {
+    var el = document.getElementById(k); if (!el) return;
+    var saved = localStorage.getItem(k);
+    if (saved !== null) { if (el.type === 'checkbox') el.checked = saved === '1'; else el.value = saved; }
+    el.addEventListener('change', function () {
+      localStorage.setItem(k, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value);
+    });
+  });
+})();
+</script>
+
+{{ footer }}</body></html>"""
+
+
+# ---------------------------------------------------------------------------
 # Template renderer
 # ---------------------------------------------------------------------------
 
@@ -973,6 +1087,64 @@ def add_deal():
 
     deals.insert(0, data)
     return jsonify({"ok": True, "updated": False}), 200
+
+
+@app.route("/settings")
+def settings():
+    clean_old_deals()
+    enriched = [{**d, "time_ago": time_ago(d["timestamp"])} for d in private_deals]
+    return render_page(
+        SETTINGS_PAGE,
+        title="Settings — DealScout",
+        description="Display preferences for DealScout.",
+        private_deals=enriched,
+    )
+
+
+@app.route("/api/private-deal", methods=["POST"])
+def add_private_deal():
+    """Private-monitor hit. Same secret as /api/deal, separate store — these must
+    never reach the homepage or /deals feed.
+
+    Only asin/price/kind are accepted. Anything else in the payload is dropped
+    rather than stored, so a future change to the sender cannot start leaking
+    member identity onto a public page by accident.
+    """
+    if request.headers.get("X-API-Secret") != API_SECRET or not API_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    asin = str(data.get("asin", ""))
+    if not valid_asin(asin):
+        return jsonify({"error": "Bad ASIN"}), 400
+    try:
+        price = round(float(data.get("price", 0)), 2)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Bad price"}), 400
+    if price <= 0:
+        return jsonify({"error": "Bad price"}), 400
+
+    entry = {
+        "asin": asin,
+        "price": price,
+        "kind": "Business" if data.get("kind") == "Business" else "Consumer",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    for i, existing in enumerate(private_deals):
+        if existing.get("asin") == asin:
+            private_deals[i] = entry
+            private_deals.insert(0, private_deals.pop(i))
+            return jsonify({"ok": True, "updated": True}), 200
+    private_deals.insert(0, entry)
+    return jsonify({"ok": True, "updated": False}), 200
+
+
+@app.route("/robots.txt")
+def robots():
+    """Keep /settings out of search results. This is a crawler request, not
+    access control — the page is still publicly fetchable by anyone with the
+    URL, and always will be while it has no login."""
+    return ("User-agent: *\nDisallow: /settings\nDisallow: /api/\n",
+            200, {"Content-Type": "text/plain"})
 
 
 @app.route("/health")
