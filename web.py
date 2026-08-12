@@ -195,6 +195,7 @@ def footer_html():
         <a href="/about">About Us</a>
         <a href="/contact">Contact</a>
         <a href="/privacy">Privacy Policy</a>
+        <a href="/settings" rel="nofollow">Settings</a>
       </div>
     </div>
     <div class="footer-bottom">
