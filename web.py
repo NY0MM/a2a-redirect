@@ -787,7 +787,8 @@ CONTACT_PAGE = """{{ head }}{{ nav }}
 SETTINGS_PAGE = """{{ head }}{{ nav }}
 <div class="page-hero">
   <h1>Site <span>Settings</span></h1>
-  <p>Preferences for how deals are displayed. Stored in your browser only — nothing is sent to us.</p>
+  <p>Preferences for how deals are displayed. Stored in your browser only — nothing is sent to us.
+     <a href="/settings/private" rel="nofollow" class="hero-sub">Monitor feed</a></p>
 </div>
 <div class="container" style="max-width:820px;">
 <div class="article">
@@ -816,33 +817,6 @@ SETTINGS_PAGE = """{{ head }}{{ nav }}
     <input type="checkbox" id="set-highlight" class="set-check" checked>
   </div>
 
-  <div style="margin-top:56px;padding-top:28px;border-top:1px solid #e5e7eb;">
-    <h2 style="margin-top:0;">Private monitor</h2>
-    <p style="font-size:14px;color:#6b7280;margin-bottom:20px;">
-      Price hits from tracked-product monitoring. Not shown on the main deals feed.
-    </p>
-
-    {% if private_deals %}
-    <div class="priv-list">
-      {% for d in private_deals %}
-      <div class="priv-row">
-        <div class="priv-main">
-          <span class="priv-asin">{{ d.asin }}</span>
-          <span class="priv-price">£{{ "%.2f"|format(d.price) }}</span>
-          {% if d.kind == 'Business' %}<span class="priv-tag">Business</span>{% endif %}
-        </div>
-        <div class="priv-side">
-          <span class="time-ago">{{ d.time_ago }}</span>
-          <a class="btn-deal" href="/deal/{{ d.asin }}" target="_blank" rel="nofollow noopener">View →</a>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-    {% else %}
-    <p style="font-size:14px;color:#9ca3af;padding:24px 0;">No recent activity.</p>
-    {% endif %}
-  </div>
-
 </div>
 </div>
 
@@ -852,15 +826,13 @@ SETTINGS_PAGE = """{{ head }}{{ nav }}
 .set-row p { font-size:13px; color:#6b7280; margin:4px 0 0; }
 .set-input { padding:8px 12px; border:1px solid #e5e7eb; border-radius:8px; font-size:14px; background:#fff; }
 .set-check { width:20px; height:20px; accent-color:#f97316; }
-.priv-list { display:flex; flex-direction:column; gap:8px; }
-.priv-row { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:14px 16px;
-            display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
-.priv-main { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-.priv-asin { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; color:#6b7280; }
-.priv-price { font-size:18px; font-weight:800; color:#111827; }
-.priv-tag { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
-            color:#f97316; border:1px solid #fed7aa; background:#fff7ed; padding:2px 8px; border-radius:999px; }
-.priv-side { display:flex; align-items:center; gap:14px; }
+/* Muted to match the hero's own body text rather than shout. Deliberately still
+   a legible, contrasting link — a link coloured to vanish into its background is
+   cloaking, which search engines penalise and which reads badly to anyone
+   reviewing the site. Quiet is the goal; invisible is a different thing. */
+.hero-sub { color:#9ca3af; text-decoration:underline; text-underline-offset:3px;
+            font-size:13px; margin-left:6px; white-space:nowrap; }
+.hero-sub:hover { color:#f97316; }
 </style>
 
 <script>
@@ -876,6 +848,60 @@ SETTINGS_PAGE = """{{ head }}{{ nav }}
   });
 })();
 </script>
+
+{{ footer }}</body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Private monitor feed — its own page, linked only from the /settings hero.
+# ---------------------------------------------------------------------------
+
+PRIVATE_PAGE = """{{ head }}{{ nav }}
+<div class="page-hero">
+  <h1>Monitor <span>Feed</span></h1>
+  <p>Price hits from tracked-product monitoring. Not included in the main deals feed.</p>
+</div>
+<div class="container" style="max-width:820px;">
+<div class="article">
+
+  {% if private_deals %}
+  <div class="priv-list">
+    {% for d in private_deals %}
+    <div class="priv-row">
+      <div class="priv-main">
+        <span class="priv-asin">{{ d.asin }}</span>
+        <span class="priv-price">£{{ "%.2f"|format(d.price) }}</span>
+        {% if d.kind == 'Business' %}<span class="priv-tag">Business</span>{% endif %}
+      </div>
+      <div class="priv-side">
+        <span class="time-ago">{{ d.time_ago }}</span>
+        <a class="btn-deal" href="/deal/{{ d.asin }}" target="_blank" rel="nofollow noopener">View →</a>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p style="font-size:14px;color:#9ca3af;padding:32px 0;">No recent activity.</p>
+  {% endif %}
+
+  <p style="margin-top:40px;font-size:13px;color:#9ca3af;">
+    <a href="/settings" rel="nofollow" style="color:#9ca3af;">← Back to settings</a>
+  </p>
+
+</div>
+</div>
+
+<style>
+.priv-list { display:flex; flex-direction:column; gap:8px; }
+.priv-row { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:14px 16px;
+            display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+.priv-main { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.priv-asin { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; color:#6b7280; }
+.priv-price { font-size:18px; font-weight:800; color:#111827; }
+.priv-tag { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+            color:#f97316; border:1px solid #fed7aa; background:#fff7ed; padding:2px 8px; border-radius:999px; }
+.priv-side { display:flex; align-items:center; gap:14px; }
+</style>
 
 {{ footer }}</body></html>"""
 
@@ -1092,12 +1118,25 @@ def add_deal():
 
 @app.route("/settings")
 def settings():
-    clean_old_deals()
-    enriched = [{**d, "time_ago": time_ago(d["timestamp"])} for d in private_deals]
     return render_page(
         SETTINGS_PAGE,
         title="Settings — DealScout",
         description="Display preferences for DealScout.",
+    )
+
+
+@app.route("/settings/private")
+def settings_private():
+    """The monitor feed. Linked only from the /settings hero — nothing on the
+    main site points here. Note that is obscurity, not access control: the page
+    has no login, so treat anything rendered on it as public. That is why the
+    entries carry no member identity."""
+    clean_old_deals()
+    enriched = [{**d, "time_ago": time_ago(d["timestamp"])} for d in private_deals]
+    return render_page(
+        PRIVATE_PAGE,
+        title="Monitor Feed — DealScout",
+        description="",
         private_deals=enriched,
     )
 
