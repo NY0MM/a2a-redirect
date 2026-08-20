@@ -1,4 +1,6 @@
 import os
+import html as _html
+import json as _json
 from datetime import datetime, timedelta
 from flask import Flask, redirect, request, jsonify, render_template_string
 
@@ -1105,9 +1107,14 @@ def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
     Documented at webservices.amazon.com/paapi5/documentation/add-to-cart-form.
     """
     tag = tag_for(market)
-    params = f"ASIN.1={asin}&Quantity.1={qty}"
+    # Index and tag parameter both copied from a link observed working in
+    # another deal group: OfferListingId.0 / Quantity.0 / tag=. The index is
+    # arbitrary so long as it is consistent, and `tag` is accepted alongside the
+    # documented `AssociateTag`. Matching a format known to work in production
+    # beats matching the docs.
+    params = f"ASIN.0={asin}&Quantity.0={qty}"
     if tag:
-        params += f"&AssociateTag={tag}"
+        params += f"&tag={tag}"
     return f"https://www.amazon.{MARKETPLACES[market]}/gp/aws/cart/add.html?{params}"
 
 
@@ -1115,16 +1122,35 @@ def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
 def cart(asin):
     """Add-to-cart button target. ?m=1 is the mobile variant.
 
-    Both variants currently resolve to the same Amazon cart URL, and that is
-    deliberate rather than unfinished: /gp/aws/cart/add.html needs the browser's
-    Amazon session to attach the item to the right basket, so handing it to the
-    app via an intent (the way /app/deal does) tends to open the product page
-    and silently DROP the add-to-cart. Sending mobile through the browser is the
-    behaviour that actually works.
+    THE MOBILE PROBLEM. /gp/aws/cart/add.html only adds to the basket in a
+    context that HAS an Amazon session. A plain browser has one. The Amazon app,
+    reached by an ordinary product deep link, does not process the cart form at
+    all — it just shows the product page, the item is silently not added, and the
+    button looks like it half-worked.
 
-    They stay two separate routes so the mobile format can be corrected here,
-    on a service that redeploys from git, without touching a bot that has to be
-    uploaded by hand.
+    Two ways to get both the app AND the add:
+
+      CART_MOBILE_MODE=app (default)
+        com.amazon.mobile.shopping.web:// hands a URL to the Amazon app's OWN
+        webview, which carries the app's logged-in session — so the cart form
+        runs inside the app rather than being discarded by it. Android uses an
+        intent with S.browser_fallback_url, so a handset without the app lands
+        on the browser URL automatically instead of a dead scheme.
+
+      CART_MOBILE_MODE=browser
+        Skip the app. Universal Links intercept *navigations* — a 302, a tapped
+        <a href> — but NOT a location change made by script after load, so a
+        script-driven hop keeps the click in the browser where the form
+        definitely works.
+
+    Set the env var to switch without touching the bot. Default is `app`
+    because opening the app is what was actually asked for; `browser` is the
+    fallback if the app turns out to drop the add.
+
+    BOTH ARE UNVERIFIED on a real handset. Test with a cheap item and check the
+    basket, not just that something opened.
+
+    Desktop keeps the plain 302 — no app to fight, so no reason to add a hop.
     """
     if not valid_asin(asin):
         return "Invalid ASIN", 400
@@ -1135,7 +1161,83 @@ def cart(asin):
         qty = max(1, min(999, int(request.args.get("q", 1))))
     except (TypeError, ValueError):
         qty = 1
-    return redirect(cart_url_for(market, asin, qty), 302)
+
+    url = cart_url_for(market, asin, qty)
+    if request.args.get("m") != "1":
+        return redirect(url, 302)
+
+    mode = os.environ.get("CART_MOBILE_MODE", "app").strip().lower()
+    # Escaped two ways on purpose: the URL carries & separators, which need HTML
+    # escaping in the href and JS-string escaping inside the script.
+    safe_attr = _html.escape(url, quote=True)
+    safe_js = _json.dumps(url)
+    note = ("Opens in the Amazon app so you stay signed in."
+            if mode == "app" else
+            "Opens in your browser &mdash; the app can drop the basket add.")
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding to basket...</title>
+<style>
+  body {{ font-family: -apple-system, sans-serif; display: flex; align-items: center;
+         justify-content: center; min-height: 100vh; margin: 0; background: #f3f3f3; }}
+  .box {{ text-align: center; padding: 2rem; }}
+  a {{ color: #e47911; font-weight: bold; }}
+  small {{ color: #666; display: block; margin-top: 1rem; }}
+</style>
+</head>
+<body>
+<div class="box">
+  <p>Adding to your Amazon basket...</p>
+  <p><a href="{safe_attr}">Tap here if nothing happens</a></p>
+  <small>{note}</small>
+</div>
+<script>
+(function () {{
+  var webUrl = {safe_js};
+  var mode = {_json.dumps(mode)};
+  var bare = webUrl.replace(/^https?:\\/\\//, "");
+  var ua = navigator.userAgent;
+  var isIOS = /iPhone|iPad|iPod/.test(ua);
+  var isAndroid = /Android/.test(ua);
+
+  function browserHop() {{
+    // replace() not href, so Back returns to Discord rather than trapping
+    // the user on this page.
+    window.location.replace(webUrl);
+  }}
+
+  if (mode !== "app" || (!isIOS && !isAndroid)) {{
+    browserHop();
+    return;
+  }}
+
+  if (isAndroid) {{
+    // browser_fallback_url is handled by Chrome itself when the package is
+    // absent — more reliable than racing a setTimeout.
+    window.location.replace(
+      "intent://" + bare +
+      "#Intent;scheme=https;package=com.amazon.mshop.android.shopping;" +
+      "S.browser_fallback_url=" + encodeURIComponent(webUrl) + ";end"
+    );
+    return;
+  }}
+
+  // iOS has no fallback mechanism in the scheme itself: if the app is not
+  // installed nothing happens at all, so time it out and use the browser.
+  var fired = Date.now();
+  window.location.href = "com.amazon.mobile.shopping.web://" + bare;
+  setTimeout(function () {{
+    // A long gap means the app opened and this tab was backgrounded; a short
+    // one means the scheme went nowhere.
+    if (Date.now() - fired < 2500 && !document.hidden) {{ browserHop(); }}
+  }}, 1200);
+}})();
+</script>
+</body>
+</html>""", 200
 
 
 @app.route("/api/deal", methods=["POST"])
