@@ -2,7 +2,8 @@ import os
 import html as _html
 import json as _json
 from datetime import datetime, timedelta
-from flask import Flask, redirect, request, jsonify, render_template_string
+from flask import (Flask, redirect, request, jsonify, render_template_string,
+                   make_response)
 
 app = Flask(__name__)
 
@@ -1098,6 +1099,25 @@ def deal_app(asin, market="UK"):
     return html, 200
 
 
+def _uncached(resp):
+    """Forbid caching on the cart routes.
+
+    Neither the redirect nor the interstitial carried cache headers, so both
+    were heuristically cacheable. That is not cosmetic: an interstitial cached
+    while CART_MOBILE_MODE was `app` keeps firing the old custom-scheme hop —
+    and the confirmation prompt with it — long after the server switched to a
+    plain redirect. The phone shows behaviour the server stopped producing,
+    which is close to undiagnosable from the outside.
+
+    The target price is also embedded in these URLs, so a shared or proxy cache
+    serving a stale one would send a member to the wrong quantity.
+    """
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
 def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
     """Amazon's Add to Cart form URL, tagged.
 
@@ -1169,7 +1189,7 @@ def cart(asin):
     # this handset-quirk workaround on. A 302 is what makes the app open with
     # no confirmation prompt.
     if request.args.get("m") != "1" or mode == "direct":
-        return redirect(url, 302)
+        return _uncached(redirect(url, 302))
     # Escaped two ways on purpose: the URL carries & separators, which need HTML
     # escaping in the href and JS-string escaping inside the script.
     safe_attr = _html.escape(url, quote=True)
@@ -1190,7 +1210,7 @@ def cart(asin):
            f'  <p><a href="{safe_attr}">or continue in the browser</a></p>'
            if mode == "app" else
            f'<p><a href="{safe_attr}">Tap here if nothing happens</a></p>')
-    return f"""<!DOCTYPE html>
+    return _uncached(make_response(f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -1259,7 +1279,7 @@ def cart(asin):
 }})();
 </script>
 </body>
-</html>""", 200
+</html>""", 200))
 
 
 @app.route("/api/deal", methods=["POST"])
