@@ -1120,37 +1120,38 @@ def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
 
 @app.route("/cart/<asin>")
 def cart(asin):
-    """Add-to-cart button target. ?m=1 is the mobile variant.
+    """Add-to-cart button target. ?m=1 selects the mobile treatment.
 
-    THE MOBILE PROBLEM. /gp/aws/cart/add.html only adds to the basket in a
-    context that HAS an Amazon session. A plain browser has one. The Amazon app,
-    reached by an ordinary product deep link, does not process the cart form at
-    all — it just shows the product page, the item is silently not added, and the
-    button looks like it half-worked.
+    A PLAIN REDIRECT IS THE RIGHT ANSWER, and the reason is worth writing down
+    because the clever version is tempting and worse.
 
-    Two ways to get both the app AND the add:
+    Amazon's apple-app-site-association claims /gp/aws/* for the shopping app,
+    so the cart URL is a genuine Universal Link. Tapped from anywhere that
+    honours Universal Links, an ordinary https:// link opens the Amazon app
+    SILENTLY, with the app's own session, and the basket add goes through.
 
-      CART_MOBILE_MODE=app (default)
-        com.amazon.mobile.shopping.web:// hands a URL to the Amazon app's OWN
-        webview, which carries the app's logged-in session — so the cart form
-        runs inside the app rather than being discarded by it. Android uses an
-        intent with S.browser_fallback_url, so a handset without the app lands
-        on the browser URL automatically instead of a dead scheme.
+    A custom scheme (com.amazon.mobile.shopping.web://) reaches the same place,
+    but iOS puts an "Open this page in Amazon?" confirmation in front of it,
+    because that is what custom schemes get. The prompt is not a bug to be
+    worked around — it is the price of not using the Universal Link. Which is
+    why the deal groups that feel slickest just link straight to Amazon.
+
+    So `direct` is the default and mobile behaves exactly like desktop. The two
+    remaining modes exist for handsets that will not co-operate:
+
+      CART_MOBILE_MODE=app
+        Interstitial that tries the custom scheme, plus a tappable button. Use
+        ONLY where Universal Links do not fire — typically an in-app browser
+        that swallows the hand-off. Costs the confirmation prompt.
 
       CART_MOBILE_MODE=browser
-        Skip the app. Universal Links intercept *navigations* — a 302, a tapped
-        <a href> — but NOT a location change made by script after load, so a
-        script-driven hop keeps the click in the browser where the form
-        definitely works.
+        Deliberately keep the click in the browser. Universal Links intercept
+        navigations but NOT a script-driven location change after load, so this
+        stays put on purpose.
 
-    Set the env var to switch without touching the bot. Default is `app`
-    because opening the app is what was actually asked for; `browser` is the
-    fallback if the app turns out to drop the add.
-
-    BOTH ARE UNVERIFIED on a real handset. Test with a cheap item and check the
-    basket, not just that something opened.
-
-    Desktop keeps the plain 302 — no app to fight, so no reason to add a hop.
+    One thing no server can fix: Discord's in-app browser does not fire
+    Universal Links at all. Members with "Open links in your browser" switched
+    off stay in the webview whatever this route does.
     """
     if not valid_asin(asin):
         return "Invalid ASIN", 400
@@ -1163,17 +1164,32 @@ def cart(asin):
         qty = 1
 
     url = cart_url_for(market, asin, qty)
-    if request.args.get("m") != "1":
+    mode = os.environ.get("CART_MOBILE_MODE", "direct").strip().lower()
+    # Desktop always, and mobile too unless someone has deliberately switched
+    # this handset-quirk workaround on. A 302 is what makes the app open with
+    # no confirmation prompt.
+    if request.args.get("m") != "1" or mode == "direct":
         return redirect(url, 302)
-
-    mode = os.environ.get("CART_MOBILE_MODE", "app").strip().lower()
     # Escaped two ways on purpose: the URL carries & separators, which need HTML
     # escaping in the href and JS-string escaping inside the script.
     safe_attr = _html.escape(url, quote=True)
     safe_js = _json.dumps(url)
-    note = ("Opens in the Amazon app so you stay signed in."
+    # Amazon's own apple-app-site-association claims /gp/aws/* for the shopping
+    # app, so the cart URL is a legitimate app target — the app is not being
+    # asked to do something Amazon excluded it from.
+    app_url = "com.amazon.mobile.shopping.web://" + url.split("://", 1)[1]
+    safe_app = _html.escape(app_url, quote=True)
+    note = ("If the app did not open, Discord's built-in browser blocked it. "
+            "Turn on <b>Settings &rsaquo; App Settings &rsaquo; Behaviour &rsaquo; "
+            "Open links in your browser</b> and the app will open every time."
             if mode == "app" else
             "Opens in your browser &mdash; the app can drop the basket add.")
+    # browser mode exists to STAY in the browser, so offering an app button
+    # there would contradict the only reason to select it.
+    cta = (f'<a class="cta" id="app" href="{safe_app}">Open in Amazon app</a>\n'
+           f'  <p><a href="{safe_attr}">or continue in the browser</a></p>'
+           if mode == "app" else
+           f'<p><a href="{safe_attr}">Tap here if nothing happens</a></p>')
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1183,15 +1199,21 @@ def cart(asin):
 <style>
   body {{ font-family: -apple-system, sans-serif; display: flex; align-items: center;
          justify-content: center; min-height: 100vh; margin: 0; background: #f3f3f3; }}
-  .box {{ text-align: center; padding: 2rem; }}
+  .box {{ text-align: center; padding: 2rem; max-width: 26rem; }}
   a {{ color: #e47911; font-weight: bold; }}
-  small {{ color: #666; display: block; margin-top: 1rem; }}
+  .cta {{ display: block; background: #ffd814; color: #0f1111; text-decoration: none;
+         padding: 0.9rem 1.2rem; border-radius: 999px; font-size: 1.05rem;
+         margin: 1.25rem 0 0.75rem; }}
+  small {{ color: #666; display: block; margin-top: 1rem; line-height: 1.5; }}
 </style>
 </head>
 <body>
 <div class="box">
   <p>Adding to your Amazon basket...</p>
-  <p><a href="{safe_attr}">Tap here if nothing happens</a></p>
+  <!-- In app mode this is a REAL TAP on a custom scheme, not decoration: an
+       in-app browser swallows a scripted scheme navigation but hands a
+       user-initiated one to the OS far more often. -->
+  {cta}
   <small>{note}</small>
 </div>
 <script>
