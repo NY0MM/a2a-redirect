@@ -1096,6 +1096,48 @@ def deal_app(asin, market="UK"):
     return html, 200
 
 
+def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
+    """Amazon's Add to Cart form URL, tagged.
+
+    AssociateTag is what Amazon actually pays attribution on — not the referrer
+    — so routing the click through this service costs nothing in commission and
+    keeps the tag out of the Discord message where it could be read or stripped.
+    Documented at webservices.amazon.com/paapi5/documentation/add-to-cart-form.
+    """
+    tag = tag_for(market)
+    params = f"ASIN.1={asin}&Quantity.1={qty}"
+    if tag:
+        params += f"&AssociateTag={tag}"
+    return f"https://www.amazon.{MARKETPLACES[market]}/gp/aws/cart/add.html?{params}"
+
+
+@app.route("/cart/<asin>")
+def cart(asin):
+    """Add-to-cart button target. ?m=1 is the mobile variant.
+
+    Both variants currently resolve to the same Amazon cart URL, and that is
+    deliberate rather than unfinished: /gp/aws/cart/add.html needs the browser's
+    Amazon session to attach the item to the right basket, so handing it to the
+    app via an intent (the way /app/deal does) tends to open the product page
+    and silently DROP the add-to-cart. Sending mobile through the browser is the
+    behaviour that actually works.
+
+    They stay two separate routes so the mobile format can be corrected here,
+    on a service that redeploys from git, without touching a bot that has to be
+    uploaded by hand.
+    """
+    if not valid_asin(asin):
+        return "Invalid ASIN", 400
+    market = (request.args.get("market") or "UK").upper()
+    if market not in MARKETPLACES:
+        return "Unknown marketplace", 404
+    try:
+        qty = max(1, min(999, int(request.args.get("q", 1))))
+    except (TypeError, ValueError):
+        qty = 1
+    return redirect(cart_url_for(market, asin, qty), 302)
+
+
 @app.route("/api/deal", methods=["POST"])
 def add_deal():
     if request.headers.get("X-API-Secret") != API_SECRET or not API_SECRET:
