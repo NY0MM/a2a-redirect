@@ -1360,16 +1360,27 @@ def cart_url_for(market: str, asin: str, qty: int = 1, seller: str = "",
     tag_kv = f"&tag={tag}" if tag else ""
 
     if seller:
-        olid = (snapshot or {}).get("listing_id") if snapshot is not None \
-            else offer_listing_id(market, asin, seller)
-        if olid:
-            # Index and tag parameter both copied from a link observed working in
-            # another deal group: OfferListingId / Quantity / tag=. The index is
-            # arbitrary so long as it is consistent, and `tag` is accepted
-            # alongside the documented `AssociateTag`. Matching a format known to
-            # work in production beats matching the docs.
-            return (f"{host}/gp/aws/cart/add.html?OfferListingId.1={_q(olid, safe='')}"
-                    f"&Quantity.1={qty}{tag_kv}")
+        # The seller-pinned product page, always.
+        #
+        # There WAS a tier above this: feed a scraped offerListingID to
+        # /gp/aws/cart/add.html for a genuine one-click add. It is removed, and
+        # the reason is worth keeping so nobody rebuilds it:
+        #
+        #   * It cannot be tested from here. That endpoint 302s an anonymous
+        #     session to sign-in, so the only way to find out whether a URL
+        #     works is to ship it and have Ben click it — which is exactly how
+        #     it produced "Uh-oh, something went wrong on our end" TWICE.
+        #   * The token is scraped from `input[name="offerListingID"]`, which is
+        #     the page's own ATC form field, not the legacy endpoint's parameter
+        #     (`OfferListingId`). They are not documented to be interchangeable
+        #     and the evidence says they are not.
+        #   * The page can carry several offers' tokens; the first match is not
+        #     guaranteed to be the pinned seller's.
+        #
+        # This URL, by contrast, is verified: `m=A3P5ROKL5A1OLE` renders
+        # Amazon's £12.99 and `m=ATZAHEMUT23PY` renders Champion Toys' £38.88.
+        # It costs one tap on "Add to Basket" and it cannot substitute a seller.
+        # A working extra tap beats a clever broken one.
         return f"{host}/dp/{asin}?m={_q(seller)}&th=1{tag_kv}"
 
     if qty > 1:
