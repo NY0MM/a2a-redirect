@@ -1,10 +1,6 @@
 import os
 import html as _html
 import json as _json
-import re as _re
-import urllib.request as _urlreq
-from urllib.parse import quote as _q, unquote as _unquote
-from typing import Optional
 from datetime import datetime, timedelta
 from flask import (Flask, redirect, request, jsonify, render_template_string,
                    make_response)
@@ -1122,273 +1118,32 @@ def _uncached(resp):
     return resp
 
 
-_OLID_RE  = _re.compile(r'name="offerListingID"[^>]*\bvalue="([^"]+)"')
-_MERCH_RE = _re.compile(r'name="merchantID"\s+value="([A-Z0-9]{10,16})"')
-_PRICE_RE = _re.compile(r'a-offscreen">\s*[£€]\s*([\d.,]+)')
-_SOLDBY_RE = _re.compile(r'sellerProfileTriggerId[^>]*>([^<]{1,60})')
-_OLID_CACHE: dict = {}
-_OLID_TTL = 180          # seconds. Long enough to serve a burst of clicks on one
-                         # ping, short enough that a price move invalidates it.
-_OLID_TIMEOUT = 3.0      # a slow scrape must not out-wait the buyer's patience
-
-# Amazon's own selling entities, per marketplace. Needed because an Amazon offer
-# renders NO merchantID and NO "sold by" link, so "no seller markup" means
-# "Amazon is the seller" — and that is only the right reading when an Amazon id
-# is what we asked for.
-AMAZON_SELLER_IDS = {
-    "UK": {"A3P5ROKL5A1OLE", "AZH2GF8Z5J95G", "ATZ9J29WRYJD1"},
-    "DE": {"A3JWKAKR8XB7XF", "AMUN6OW4OKOC5"},
-    "FR": {"A1X6FK5RDHNB96", "A2W68NJA5YNXUP"},
-    "IT": {"A11IL2PNWYJU7H", "A1TMZHY2SHKLH2"},
-    "ES": {"A1AT7YVPFBWXBL", "A13P6277X44WWB"},
-}
-
-# How far the live price may drift from the pinged price before the buyer is
-# warned instead of forwarded. Small, because the whole point is that a
-# substituted offer is usually MUCH dearer — B0GR6M4JV3 was 3x.
-PRICE_TOLERANCE_PCT = 5.0
-
-
-def offer_snapshot(market: str, asin: str, seller: str) -> dict:
-    """What Amazon shows RIGHT NOW for this ASIN pinned to this seller.
-
-    Returns {ok, price, shown_seller, listing_id, honoured}. `ok` False means
-    the page could not be read at all — never treat that as "the deal is fine".
-
-    Fetched at click time rather than at ping time, on purpose. Ping time would
-    mean a scrape for every one of ~11,500 ASINs per sweep, and the answer would
-    be minutes stale by the time anyone clicked; click time is a handful of
-    fetches a day, each seconds old.
-
-    WHY THIS EXISTS AT ALL. `?m=<seller>` pins the offer only while that seller
-    HAS one. When their offer goes, Amazon does not say so — it silently renders
-    the next featured offer at the next price up, which is the same substitution
-    the cart was doing, just moved to the product page. Nothing in the markup
-    distinguishes "pinned to Amazon" from "fell back to Amazon", because an
-    Amazon offer carries no seller markup either way. So the honest check is the
-    PRICE: the buyer was pinged a number, and this is whether that number is
-    still on screen.
-
-    Deliberately stdlib-only. The first version imported `requests` at module
-    level; requirements.txt here is just flask + gunicorn, so on Railway that
-    was an ImportError at boot — gunicorn never bound and every route, not only
-    the cart, returned 502. A convenience that can take the whole redirect
-    service down is not a convenience. Nothing here may raise past the except.
-    """
-    key = (market, asin, seller)
-    hit = _OLID_CACHE.get(key)
-    now = datetime.utcnow().timestamp()
-    if hit and now - hit[1] < _OLID_TTL:
-        return hit[0]
-    url = (f"https://www.amazon.{MARKETPLACES[market]}/dp/{asin}"
-           f"?m={_q(seller)}&th=1")
-    out = {"ok": False, "price": None, "shown_seller": None,
-           "listing_id": None, "honoured": None}
-    try:
-        req = _urlreq.Request(url, headers={
-            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/126.0 Safari/537.36"),
-            "Accept-Language": "en-GB,en;q=0.9",
-        })
-        with _urlreq.urlopen(req, timeout=_OLID_TIMEOUT) as resp:
-            # Cap the read: everything wanted here is in the first few hundred
-            # KB, and a redirect worker must not stall on a multi-MB page.
-            body = resp.read(700_000).decode("utf-8", "replace")
-
-        m = _OLID_RE.search(body)
-        # TWO layers of escaping sit on this value and both must come off, or
-        # the id is corrupt by the time Amazon reads it back:
-        #   1. HTML entity escaping, because it lives in an attribute
-        #   2. percent-encoding — Amazon ships the id ALREADY encoded, so the
-        #      attribute really does contain a literal "%2F" for every "/"
-        # Missing (2) produced "%252F" in the URL and an Amazon error page
-        # ("Uh-oh, something went wrong on our end"), 2026-08-22. Returning the
-        # DECODED id keeps the encoding decision in one place: whoever builds
-        # the URL quotes it exactly once. unquote is safe on an already-decoded
-        # value, so this still holds if Amazon stops encoding.
-        out["listing_id"] = _unquote(_html.unescape(m.group(1))) if m else None
-
-        merch = _MERCH_RE.search(body)
-        sold  = _SOLDBY_RE.search(body)
-        out["shown_seller"] = (merch.group(1) if merch else
-                               (sold.group(1).strip() if sold else None))
-        pr = _PRICE_RE.search(body)
-        if pr:
-            try:
-                out["price"] = float(pr.group(1).replace(",", ""))
-            except ValueError:
-                out["price"] = None
-
-        is_amazon_request = seller in AMAZON_SELLER_IDS.get(market, set())
-        if merch:
-            out["honoured"] = (merch.group(1) == seller)
-        else:
-            # No merchant markup at all -> Amazon is the one on screen.
-            out["honoured"] = is_amazon_request
-        out["ok"] = True
-    except Exception:
-        pass
-    _OLID_CACHE[key] = (out, now)
-    return out
-
-
-def offer_listing_id(market: str, asin: str, seller: str):
-    """Back-compat shim: just the listing id, or None."""
-    return offer_snapshot(market, asin, seller).get("listing_id")
-
-
-def _offer_is_gone(snap: dict, seller: str, expected: Optional[float]):
-    """Should the buyer be warned instead of forwarded? -> (bool, reason).
-
-    Ordered by how certain each signal is.
-
-    A failed fetch is NOT treated as "gone". Amazon throttles datacentre IPs,
-    and an unreachable page says nothing about the offer; blocking every click
-    during a throttle would break the buttons far more often than substitution
-    ever did. That is the deliberate hole in this check: it catches the offer
-    disappearing, not Amazon refusing to talk to us.
-    """
-    if not snap.get("ok"):
-        return False, ""
-    if snap.get("honoured") is False:
-        return True, "seller"
-    if expected and snap.get("price"):
-        live = snap["price"]
-        # Only a rise matters. A price DROP is a better deal than advertised and
-        # nobody needs protecting from it.
-        if live > expected * (1 + PRICE_TOLERANCE_PCT / 100):
-            return True, "price"
-    return False, ""
-
-
-def _money(market: str, amount: float) -> str:
-    return ("£" if market == "UK" else "€") + f"{amount:,.2f}"
-
-
-def _offer_gone_page(market: str, asin: str, seller: str,
-                     expected: Optional[float], snap: dict, why: str) -> str:
-    """Say plainly that the deal is gone, and what is there instead.
-
-    The buyer still gets one tap to the live offers — the point is that they
-    choose it knowing the price changed, rather than discovering it in the
-    basket two screens later.
-    """
-    live = snap.get("price")
-    if why == "seller":
-        headline = "That seller's offer is gone"
-        detail = ("The offer this lead was priced on is no longer listed. "
-                  "Amazon is showing a different seller instead.")
-    else:
-        headline = "The price has moved"
-        detail = "This is no longer the price the lead was posted at."
-    rows = ""
-    if expected:
-        rows += (f'<div class="row"><span>Pinged at</span>'
-                 f'<b class="was">{_money(market, expected)}</b></div>')
-    if live:
-        rows += (f'<div class="row"><span>On Amazon now</span>'
-                 f'<b class="now">{_money(market, live)}</b></div>')
-    shown = snap.get("shown_seller")
-    if shown and shown != seller:
-        rows += (f'<div class="row"><span>Sold by</span>'
-                 f'<b>{_html.escape(str(shown))}</b></div>')
-    return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Offer changed</title>
-<style>
- :root{{color-scheme:light dark}}
- body{{margin:0;min-height:100vh;display:flex;align-items:center;
-   justify-content:center;font:16px/1.5 -apple-system,BlinkMacSystemFont,
-   "Segoe UI",Roboto,sans-serif;background:#0f1115;color:#e8eaed;padding:24px}}
- .card{{max-width:26rem;width:100%;background:#181b21;border:1px solid #2a2f3a;
-   border-radius:14px;padding:26px}}
- h1{{margin:0 0 8px;font-size:1.25rem}}
- p.d{{margin:0 0 18px;color:#a8b0bd}}
- .row{{display:flex;justify-content:space-between;padding:9px 0;
-   border-top:1px solid #242832}}
- .row span{{color:#a8b0bd}} .was{{text-decoration:line-through;color:#8b94a3}}
- .now{{color:#ff8a80}}
- a.cta{{display:block;text-align:center;margin-top:20px;padding:13px;
-   border-radius:9px;background:#f0a020;color:#111;font-weight:600;
-   text-decoration:none}}
- a.alt{{display:block;text-align:center;margin-top:10px;color:#a8b0bd;
-   font-size:.9rem}}
-</style></head><body><div class="card">
- <h1>{headline}</h1>
- <p class="d">{detail}</p>
- {rows}
- <a class="cta" href="{_html.escape(offers_url_for(market, asin), quote=True)}">See all current offers</a>
- <a class="alt" href="{_html.escape(amazon_url_for(market, asin), quote=True)}">Open the product page</a>
-</div></body></html>"""
-
-
-def offers_url_for(market: str, asin: str) -> str:
-    """Every current offer on one screen — the honest answer when we cannot
-    promise the buyer a specific one."""
-    tag = tag_for(market)
-    return (f"https://www.amazon.{MARKETPLACES[market]}/gp/offer-listing/{asin}"
-            + (f"?tag={tag}" if tag else ""))
-
-
-def cart_url_for(market: str, asin: str, qty: int = 1, seller: str = "",
-                 snapshot: Optional[dict] = None) -> str:
-    """Amazon's Add to Cart form URL, tagged and PINNED TO ONE SELLER.
+def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
+    """Amazon's Add to Cart form URL, tagged.
 
     AssociateTag is what Amazon actually pays attribution on — not the referrer
     — so routing the click through this service costs nothing in commission and
     keeps the tag out of the Discord message where it could be read or stripped.
     Documented at webservices.amazon.com/paapi5/documentation/add-to-cart-form.
 
-    WHY THE SELLER MATTERS. `ASIN.0` names a product, not an offer, so Amazon
-    picks the offer itself — and when the requested quantity exceeds what the
-    cheapest seller will sell one customer it picks a DEARER one without saying
-    so. B0GR6M4JV3 on 2026-08-22: judged on Amazon at £12.99, basket came back
-    holding an FBM seller at £39.07. Three tiers, safest first:
-
-      1. OfferListingId — one exact offer. Adds that offer or fails cleanly.
-      2. `m=<seller>` product page — right seller, buyer taps Add. Used when the
-         listing id cannot be read, which includes every Amazon Business offer
-         (those need a logged-in Business session, so no server can scrape one;
-         the buyer's own session supplies the Business price on this page).
-      3. Bare `ASIN.0` — only ever at quantity 1, where there is no quantity for
-         Amazon to fail to satisfy and so nothing to substitute over.
+    KNOWN LIMITATION, reverted to deliberately on 2026-08-22 at Ben's request.
+    `ASIN.0` names a PRODUCT, not an offer, so Amazon chooses which offer to
+    add. When the requested quantity is more than the cheapest seller will sell
+    one customer, it silently adds a dearer seller's offer instead: B0GR6M4JV3
+    was judged on Amazon at £12.99 and put an FBM seller's £39.07 in the basket
+    at Quantity 20. Check the seller and price in the basket before ordering,
+    especially after using Add Max.
     """
     tag = tag_for(market)
-    host = f"https://www.amazon.{MARKETPLACES[market]}"
-    tag_kv = f"&tag={tag}" if tag else ""
-
-    if seller:
-        # The seller-pinned product page, always.
-        #
-        # There WAS a tier above this: feed a scraped offerListingID to
-        # /gp/aws/cart/add.html for a genuine one-click add. It is removed, and
-        # the reason is worth keeping so nobody rebuilds it:
-        #
-        #   * It cannot be tested from here. That endpoint 302s an anonymous
-        #     session to sign-in, so the only way to find out whether a URL
-        #     works is to ship it and have Ben click it — which is exactly how
-        #     it produced "Uh-oh, something went wrong on our end" TWICE.
-        #   * The token is scraped from `input[name="offerListingID"]`, which is
-        #     the page's own ATC form field, not the legacy endpoint's parameter
-        #     (`OfferListingId`). They are not documented to be interchangeable
-        #     and the evidence says they are not.
-        #   * The page can carry several offers' tokens; the first match is not
-        #     guaranteed to be the pinned seller's.
-        #
-        # This URL, by contrast, is verified: `m=A3P5ROKL5A1OLE` renders
-        # Amazon's £12.99 and `m=ATZAHEMUT23PY` renders Champion Toys' £38.88.
-        # It costs one tap on "Add to Basket" and it cannot substitute a seller.
-        # A working extra tap beats a clever broken one.
-        return f"{host}/dp/{asin}?m={_q(seller)}&th=1{tag_kv}"
-
-    if qty > 1:
-        # Unpinned AND multi-quantity is the exact combination that substituted.
-        # The offer list is the honest answer: every price on one screen.
-        return f"{host}/gp/offer-listing/{asin}" + (f"?{tag_kv[1:]}" if tag_kv else "")
-
-    return f"{host}/gp/aws/cart/add.html?ASIN.0={asin}&Quantity.0={qty}{tag_kv}"
+    # Index and tag parameter both copied from a link observed working in
+    # another deal group: ASIN.0 / Quantity.0 / tag=. The index is arbitrary so
+    # long as it is consistent, and `tag` is accepted alongside the documented
+    # `AssociateTag`. Matching a format known to work in production beats
+    # matching the docs.
+    params = f"ASIN.0={asin}&Quantity.0={qty}"
+    if tag:
+        params += f"&tag={tag}"
+    return f"https://www.amazon.{MARKETPLACES[market]}/gp/aws/cart/add.html?{params}"
 
 
 @app.route("/cart/<asin>")
@@ -1436,30 +1191,7 @@ def cart(asin):
     except (TypeError, ValueError):
         qty = 1
 
-    # Seller ids are a fixed alphabet; anything else is a malformed or hostile
-    # button and is treated as "no seller" rather than pasted into an Amazon URL.
-    seller = (request.args.get("s") or "").strip()
-    if not _re.fullmatch(r"[A-Z0-9]{5,20}", seller):
-        seller = ""
-
-    # The price the deal was judged at, carried on the button by the bot. It is
-    # the only thing that can tell a pinned offer from a substituted one.
-    try:
-        expected = float(request.args.get("p") or 0) or None
-    except (TypeError, ValueError):
-        expected = None
-
-    snap = offer_snapshot(market, asin, seller) if seller else None
-    if snap is not None:
-        gone, why = _offer_is_gone(snap, seller, expected)
-        if gone:
-            # Do NOT forward. Amazon would render the next offer up as though it
-            # were the deal, which is exactly the silent substitution this whole
-            # route exists to stop.
-            return _uncached(make_response(_offer_gone_page(
-                market, asin, seller, expected, snap, why)))
-
-    url = cart_url_for(market, asin, qty, seller, snap)
+    url = cart_url_for(market, asin, qty)
     mode = os.environ.get("CART_MOBILE_MODE", "direct").strip().lower()
     # Desktop always, and mobile too unless someone has deliberately switched
     # this handset-quirk workaround on. A 302 is what makes the app open with
