@@ -2,7 +2,7 @@ import os
 import html as _html
 import json as _json
 import re as _re
-import requests as _requests
+import urllib.request as _urlreq
 from urllib.parse import quote as _q
 from datetime import datetime, timedelta
 from flask import (Flask, redirect, request, jsonify, render_template_string,
@@ -1138,6 +1138,13 @@ def offer_listing_id(market: str, asin: str, seller: str):
 
     None is an ordinary outcome, not a failure to log loudly: Amazon throttles
     datacentre IPs, and the caller has a safe fallback that needs no scraping.
+
+    Deliberately stdlib-only. The first version imported `requests` at module
+    level; requirements.txt here is just flask + gunicorn, so on Railway that
+    was an ImportError at boot — gunicorn never bound and every route, not only
+    the cart, returned 502. A convenience that can take the whole redirect
+    service down is not a convenience. Nothing in this function may raise past
+    the bare except below.
     """
     key = (market, asin, seller)
     hit = _OLID_CACHE.get(key)
@@ -1147,13 +1154,17 @@ def offer_listing_id(market: str, asin: str, seller: str):
     url = (f"https://www.amazon.{MARKETPLACES[market]}/dp/{asin}"
            f"?m={_q(seller)}&th=1")
     try:
-        r = _requests.get(url, timeout=_OLID_TIMEOUT, headers={
+        req = _urlreq.Request(url, headers={
             "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                            "AppleWebKit/537.36 (KHTML, like Gecko) "
                            "Chrome/126.0 Safari/537.36"),
             "Accept-Language": "en-GB,en;q=0.9",
         })
-        m = _OLID_RE.search(r.text) if r.status_code == 200 else None
+        with _urlreq.urlopen(req, timeout=_OLID_TIMEOUT) as resp:
+            # Cap the read: an offer listing id appears in the first few hundred
+            # KB, and a redirect worker must not stall on a multi-MB page.
+            body = resp.read(600_000).decode("utf-8", "replace")
+        m = _OLID_RE.search(body)
         found = _html.unescape(m.group(1)) if m else None
     except Exception:
         found = None
@@ -1202,7 +1213,7 @@ def cart_url_for(market: str, asin: str, qty: int = 1, seller: str = "") -> str:
     if qty > 1:
         # Unpinned AND multi-quantity is the exact combination that substituted.
         # The offer list is the honest answer: every price on one screen.
-        return f"{host}/gp/offer-listing/{asin}?{tag_kv.lstrip('&')}"
+        return f"{host}/gp/offer-listing/{asin}" + (f"?{tag_kv[1:]}" if tag_kv else "")
 
     return f"{host}/gp/aws/cart/add.html?ASIN.0={asin}&Quantity.0={qty}{tag_kv}"
 
@@ -1450,4 +1461,4 @@ def robots():
 
 @app.route("/health")
 def health():
-    return "Deal tracker is running.", 200")
+    return "Deal tracker is running.", 200
