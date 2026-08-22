@@ -1,6 +1,9 @@
 import os
 import html as _html
 import json as _json
+import re as _re
+import requests as _requests
+from urllib.parse import quote as _q
 from datetime import datetime, timedelta
 from flask import (Flask, redirect, request, jsonify, render_template_string,
                    make_response)
@@ -1118,24 +1121,90 @@ def _uncached(resp):
     return resp
 
 
-def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
-    """Amazon's Add to Cart form URL, tagged.
+_OLID_RE = _re.compile(r'name="offerListingID"[^>]*\bvalue="([^"]+)"')
+_OLID_CACHE: dict = {}
+_OLID_TTL = 180          # seconds. Long enough to serve a burst of clicks on one
+                         # ping, short enough that a price move invalidates it.
+_OLID_TIMEOUT = 3.0      # a slow scrape must not out-wait the buyer's patience
+
+
+def offer_listing_id(market: str, asin: str, seller: str):
+    """The opaque token identifying ONE seller's offer, or None.
+
+    Fetched at click time rather than at ping time, on purpose. Ping time would
+    mean a scrape for every one of ~11,500 ASINs per sweep, and the id would be
+    minutes stale by the time anyone clicked; click time is a handful of fetches
+    a day, each seconds old.
+
+    None is an ordinary outcome, not a failure to log loudly: Amazon throttles
+    datacentre IPs, and the caller has a safe fallback that needs no scraping.
+    """
+    key = (market, asin, seller)
+    hit = _OLID_CACHE.get(key)
+    now = datetime.utcnow().timestamp()
+    if hit and now - hit[1] < _OLID_TTL:
+        return hit[0]
+    url = (f"https://www.amazon.{MARKETPLACES[market]}/dp/{asin}"
+           f"?m={_q(seller)}&th=1")
+    try:
+        r = _requests.get(url, timeout=_OLID_TIMEOUT, headers={
+            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/126.0 Safari/537.36"),
+            "Accept-Language": "en-GB,en;q=0.9",
+        })
+        m = _OLID_RE.search(r.text) if r.status_code == 200 else None
+        found = _html.unescape(m.group(1)) if m else None
+    except Exception:
+        found = None
+    _OLID_CACHE[key] = (found, now)
+    return found
+
+
+def cart_url_for(market: str, asin: str, qty: int = 1, seller: str = "") -> str:
+    """Amazon's Add to Cart form URL, tagged and PINNED TO ONE SELLER.
 
     AssociateTag is what Amazon actually pays attribution on — not the referrer
     — so routing the click through this service costs nothing in commission and
     keeps the tag out of the Discord message where it could be read or stripped.
     Documented at webservices.amazon.com/paapi5/documentation/add-to-cart-form.
+
+    WHY THE SELLER MATTERS. `ASIN.0` names a product, not an offer, so Amazon
+    picks the offer itself — and when the requested quantity exceeds what the
+    cheapest seller will sell one customer it picks a DEARER one without saying
+    so. B0GR6M4JV3 on 2026-08-22: judged on Amazon at £12.99, basket came back
+    holding an FBM seller at £39.07. Three tiers, safest first:
+
+      1. OfferListingId — one exact offer. Adds that offer or fails cleanly.
+      2. `m=<seller>` product page — right seller, buyer taps Add. Used when the
+         listing id cannot be read, which includes every Amazon Business offer
+         (those need a logged-in Business session, so no server can scrape one;
+         the buyer's own session supplies the Business price on this page).
+      3. Bare `ASIN.0` — only ever at quantity 1, where there is no quantity for
+         Amazon to fail to satisfy and so nothing to substitute over.
     """
     tag = tag_for(market)
-    # Index and tag parameter both copied from a link observed working in
-    # another deal group: OfferListingId.0 / Quantity.0 / tag=. The index is
-    # arbitrary so long as it is consistent, and `tag` is accepted alongside the
-    # documented `AssociateTag`. Matching a format known to work in production
-    # beats matching the docs.
-    params = f"ASIN.0={asin}&Quantity.0={qty}"
-    if tag:
-        params += f"&tag={tag}"
-    return f"https://www.amazon.{MARKETPLACES[market]}/gp/aws/cart/add.html?{params}"
+    host = f"https://www.amazon.{MARKETPLACES[market]}"
+    tag_kv = f"&tag={tag}" if tag else ""
+
+    if seller:
+        olid = offer_listing_id(market, asin, seller)
+        if olid:
+            # Index and tag parameter both copied from a link observed working in
+            # another deal group: OfferListingId / Quantity / tag=. The index is
+            # arbitrary so long as it is consistent, and `tag` is accepted
+            # alongside the documented `AssociateTag`. Matching a format known to
+            # work in production beats matching the docs.
+            return (f"{host}/gp/aws/cart/add.html?OfferListingId.1={_q(olid)}"
+                    f"&Quantity.1={qty}{tag_kv}")
+        return f"{host}/dp/{asin}?m={_q(seller)}&th=1{tag_kv}"
+
+    if qty > 1:
+        # Unpinned AND multi-quantity is the exact combination that substituted.
+        # The offer list is the honest answer: every price on one screen.
+        return f"{host}/gp/offer-listing/{asin}?{tag_kv.lstrip('&')}"
+
+    return f"{host}/gp/aws/cart/add.html?ASIN.0={asin}&Quantity.0={qty}{tag_kv}"
 
 
 @app.route("/cart/<asin>")
@@ -1183,7 +1252,13 @@ def cart(asin):
     except (TypeError, ValueError):
         qty = 1
 
-    url = cart_url_for(market, asin, qty)
+    # Seller ids are a fixed alphabet; anything else is a malformed or hostile
+    # button and is treated as "no seller" rather than pasted into an Amazon URL.
+    seller = (request.args.get("s") or "").strip()
+    if not _re.fullmatch(r"[A-Z0-9]{5,20}", seller):
+        seller = ""
+
+    url = cart_url_for(market, asin, qty, seller)
     mode = os.environ.get("CART_MOBILE_MODE", "direct").strip().lower()
     # Desktop always, and mobile too unless someone has deliberately switched
     # this handset-quirk workaround on. A 302 is what makes the app open with
@@ -1375,4 +1450,4 @@ def robots():
 
 @app.route("/health")
 def health():
-    return "Deal tracker is running.", 200
+    return "Deal tracker is running.", 200")
