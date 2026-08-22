@@ -3,7 +3,7 @@ import html as _html
 import json as _json
 import re as _re
 import urllib.request as _urlreq
-from urllib.parse import quote as _q
+from urllib.parse import quote as _q, unquote as _unquote
 from datetime import datetime, timedelta
 from flask import (Flask, redirect, request, jsonify, render_template_string,
                    make_response)
@@ -1165,7 +1165,17 @@ def offer_listing_id(market: str, asin: str, seller: str):
             # KB, and a redirect worker must not stall on a multi-MB page.
             body = resp.read(600_000).decode("utf-8", "replace")
         m = _OLID_RE.search(body)
-        found = _html.unescape(m.group(1)) if m else None
+        # TWO layers of escaping sit on this value and both must come off, or
+        # the id is corrupt by the time Amazon reads it back:
+        #   1. HTML entity escaping, because it lives in an attribute
+        #   2. percent-encoding — Amazon ships the id ALREADY encoded, so the
+        #      attribute really does contain a literal "%2F" for every "/"
+        # Missing (2) produced "%252F" in the URL and an Amazon error page
+        # ("Uh-oh, something went wrong on our end"), 2026-08-22.
+        # Returning the DECODED id keeps the encoding decision in one place:
+        # whoever builds the URL quotes it exactly once. unquote is safe to run
+        # on an already-decoded value, so this holds if Amazon stops encoding.
+        found = _unquote(_html.unescape(m.group(1))) if m else None
     except Exception:
         found = None
     _OLID_CACHE[key] = (found, now)
@@ -1206,7 +1216,7 @@ def cart_url_for(market: str, asin: str, qty: int = 1, seller: str = "") -> str:
             # arbitrary so long as it is consistent, and `tag` is accepted
             # alongside the documented `AssociateTag`. Matching a format known to
             # work in production beats matching the docs.
-            return (f"{host}/gp/aws/cart/add.html?OfferListingId.1={_q(olid)}"
+            return (f"{host}/gp/aws/cart/add.html?OfferListingId.1={_q(olid, safe='')}"
                     f"&Quantity.1={qty}{tag_kv}")
         return f"{host}/dp/{asin}?m={_q(seller)}&th=1{tag_kv}"
 
