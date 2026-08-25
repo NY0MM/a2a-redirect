@@ -1142,7 +1142,14 @@ def cart_url_for(market: str, asin: str, qty: int = 1) -> str:
     # matching the docs.
     params = f"ASIN.0={asin}&Quantity.0={qty}"
     if tag:
-        params += f"&tag={tag}"
+        # BOTH spellings, deliberately. `tag` is the shorthand every /dp/ link
+        # uses; `AssociateTag` is what the Add-to-Cart form's own documentation
+        # specifies, and this is that form — a retired Product Advertising API
+        # endpoint, not a product page. Assuming it accepts the /dp/ shorthand
+        # is exactly the kind of guess that costs commission silently, and
+        # Amazon ignores query parameters it does not recognise, so sending
+        # both is free. Checked 2026-08-25 after commission stopped showing.
+        params += f"&AssociateTag={tag}&tag={tag}"
     return f"https://www.amazon.{MARKETPLACES[market]}/gp/aws/cart/add.html?{params}"
 
 
