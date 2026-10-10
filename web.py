@@ -1,4 +1,6 @@
 import os
+import re
+from urllib.parse import quote as _urlquote
 import html as _html
 import json as _json
 from datetime import datetime, timedelta
@@ -1295,6 +1297,50 @@ def cart(asin):
 </script>
 </body>
 </html>""", 200))
+
+
+# 🔁 S&S Max button target. Amazon's Buy Now checkout with a subscription
+# frequency — the format another deal group uses — skipping the basket straight
+# to checkout on Subscribe & Save. The bot reads the listing's S&S offer id
+# (hidden snsOfferListingId on the product page) and passes it as ?o=; this
+# adds the tag, so it never appears in the Discord message.
+_SNS_OFFER_RE = re.compile(r"^[A-Za-z0-9+/=_%-]{20,600}$")
+_SNS_FREQ_RE = re.compile(r"^[1-9][0-9]?[WM]$")
+
+
+def sns_url_for(market: str, asin: str, offer_id: str, qty: int = 999,
+                freq: str = "6M") -> str:
+    tag = tag_for(market)
+    url = (f"https://www.amazon.{MARKETPLACES[market]}/checkout/entry/buynow"
+           f"?ASIN={asin}&offerListingID={_urlquote(offer_id, safe='')}"
+           f"&rcxOrdFreq={freq}&pipelineType=Chewbacca&quantity={qty}"
+           f"&buyNow=1&skipCart=1")
+    return url + (f"&tag={tag}" if tag else "")
+
+
+@app.route("/sns/<asin>")
+def sns(asin):
+    if not valid_asin(asin):
+        return "Invalid ASIN", 400
+    market = (request.args.get("market") or "UK").upper()
+    if market not in MARKETPLACES:
+        return "Unknown marketplace", 404
+    offer = request.args.get("o", "")
+    if not _SNS_OFFER_RE.match(offer):
+        # No usable offer id: the listing, tagged, so the member can still pick
+        # Subscribe & Save themselves rather than hitting an error.
+        tag = tag_for(market)
+        return _uncached(redirect(
+            f"https://www.amazon.{MARKETPLACES[market]}/dp/{asin}"
+            + (f"?tag={tag}" if tag else ""), 302))
+    try:
+        qty = max(1, min(999, int(request.args.get("q", 999))))
+    except (TypeError, ValueError):
+        qty = 999
+    freq = request.args.get("f", "6M").upper()
+    if not _SNS_FREQ_RE.match(freq):
+        freq = "6M"
+    return _uncached(redirect(sns_url_for(market, asin, offer, qty, freq), 302))
 
 
 @app.route("/api/deal", methods=["POST"])
